@@ -4,17 +4,28 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Calendario Familiar</title>
-  <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/babel-standalone@7/babel.min.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
-  <style>* { box-sizing: border-box; margin: 0; padding: 0; } body { font-family: sans-serif; background: #F8F9FB; min-height: 100vh; }</style>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: sans-serif; background: #F8F9FB; min-height: 100vh; padding: 20px; }
+    button { cursor: pointer; }
+    .grid { display: grid; grid-template-columns: 1fr 320px; gap: 16px; }
+    .card { background: #fff; border-radius: 16px; padding: 20px; box-shadow: 0 1px 6px rgba(0,0,0,.06); }
+    .cal-grid { display: grid; grid-template-columns: repeat(7,1fr); gap: 2px; }
+    .cal-day { min-height: 52px; border-radius: 10px; padding: 4px 5px; cursor: pointer; }
+    .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; z-index: 100; }
+    .modal { background: #fff; border-radius: 16px; padding: 28px; width: 360px; box-shadow: 0 8px 32px rgba(0,0,0,.12); max-height: 90vh; overflow-y: auto; }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+    input[type=text], input[type=date], input[type=time] { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1.5px solid #e5e7eb; font-size: 14px; outline: none; background: #fafafa; box-sizing: border-box; }
+    label { display: block; font-size: 12px; font-weight: 600; color: #888; margin-bottom: 5px; }
+    @media (max-width: 650px) { .grid { grid-template-columns: 1fr; } }
+  </style>
 </head>
 <body>
-<div id="root"></div>
-<script type="text/babel">
-const { useState, useEffect } = React;
+<div id="app"><p style="padding:20px;color:#888">Cargando...</p></div>
+
+<script type="module">
+import { initializeApp, getApps } from "https://cdn.jsdelivr.net/npm/firebase@10.12.0/app/+esm";
+import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc } from "https://cdn.jsdelivr.net/npm/firebase@10.12.0/firestore/+esm";
 
 const firebaseConfig = {
   apiKey: "AIzaSyAF9BnqsRo2SAO1mzXM8VeRBMFgH9bQ8Jc",
@@ -25,8 +36,8 @@ const firebaseConfig = {
   appId: "1:1029082726949:web:609952c599563d871075cc"
 };
 
-if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
-const db = firebase.firestore();
+const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
+const db = getFirestore(app);
 
 const DEFAULT_MEMBERS = [
   { id: 1, name: "Mamá", color: "#7C6AF7" },
@@ -38,244 +49,263 @@ const DEFAULT_MEMBERS = [
 const DAYS = ["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"];
 const MONTHS = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 
-function getDaysInMonth(y,m){ return new Date(y,m+1,0).getDate(); }
-function getFirstDay(y,m){ const d=new Date(y,m,1).getDay(); return d===0?6:d-1; }
-function todayStr(){ const t=new Date(); return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`; }
-function dateStr(y,m,d){ return `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`; }
-function uid(){ return Math.random().toString(36).slice(2,10); }
+let state = {
+  year: new Date().getFullYear(),
+  month: new Date().getMonth(),
+  selectedDate: todayStr(),
+  events: [],
+  members: [...DEFAULT_MEMBERS],
+  filter: 0,
+  modal: null,
+  editingMemberId: null,
+  editingMemberName: "",
+  status: "Conectando…"
+};
 
-const lbl = { display:"block", fontSize:12, fontWeight:600, color:"#888", marginBottom:5 };
-const inp = { width:"100%", padding:"8px 10px", borderRadius:8, border:"1.5px solid #e5e7eb", fontSize:14, outline:"none", boxSizing:"border-box", background:"#fafafa" };
+function todayStr() {
+  const t = new Date();
+  return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`;
+}
+function dateStr(y,m,d) {
+  return `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+}
+function getDaysInMonth(y,m) { return new Date(y,m+1,0).getDate(); }
+function getFirstDay(y,m) { const d=new Date(y,m,1).getDay(); return d===0?6:d-1; }
+function uid() { return Math.random().toString(36).slice(2,10); }
+function memberColor(id) { return state.members.find(m=>m.id===id)?.color||"#999"; }
 
-function App() {
-  const today = new Date();
-  const [year, setYear] = useState(today.getFullYear());
-  const [month, setMonth] = useState(today.getMonth());
-  const [selectedDate, setSelectedDate] = useState(todayStr());
-  const [events, setEvents] = useState([]);
-  const [members, setMembers] = useState(DEFAULT_MEMBERS);
-  const [filter, setFilter] = useState(0);
-  const [modal, setModal] = useState(null);
-  const [notifGranted, setNotifGranted] = useState(false);
-  const [editingMember, setEditingMember] = useState(null);
-  const [status, setStatus] = useState("Conectando…");
+function setState(patch) { state = {...state, ...patch}; render(); }
 
-  useEffect(() => {
-    if ("Notification" in window && Notification.permission === "granted") setNotifGranted(true);
-    const unsubE = db.collection("events").onSnapshot(snap => {
-      setEvents(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-      setStatus("🟢 Sincronizado");
-    }, () => setStatus("🔴 Sin conexión"));
-    const unsubM = db.collection("members").onSnapshot(snap => {
-      if (!snap.empty) setMembers(snap.docs.map(d => ({ ...d.data() })));
-    });
-    return () => { unsubE(); unsubM(); };
-  }, []);
+// Firebase listeners
+onSnapshot(collection(db,"events"), snap => {
+  state.events = snap.docs.map(d => ({id:d.id,...d.data()}));
+  state.status = "🟢 Sincronizado";
+  render();
+}, () => { state.status = "🔴 Sin conexión"; render(); });
 
-  const saveEvent = async (evt) => {
-    const id = String(evt.id || uid());
-    await db.collection("events").doc(id).set({ ...evt, id });
-    setModal(null);
-  };
-  const deleteEvent = async (id) => db.collection("events").doc(String(id)).delete();
-  const toggleDone = async (id) => {
-    const evt = events.find(e => e.id === id);
-    if (evt) await saveEvent({ ...evt, done: !evt.done });
-  };
-  const saveMemberName = async () => {
-    if (!editingMember?.name.trim()) return;
-    const updated = members.map(m => m.id === editingMember.id ? { ...m, name: editingMember.name.trim() } : m);
-    for (const m of updated) await db.collection("members").doc(String(m.id)).set(m);
-    setEditingMember(null);
-  };
-  const requestNotif = async () => {
-    if ("Notification" in window) {
-      const p = await Notification.requestPermission();
-      if (p === "granted") setNotifGranted(true);
-    }
-  };
+onSnapshot(collection(db,"members"), snap => {
+  if (snap.empty) {
+    DEFAULT_MEMBERS.forEach(m => setDoc(doc(db,"members",String(m.id)), m));
+  } else {
+    const fromDB = snap.docs.map(d => ({...d.data()}));
+    state.members = DEFAULT_MEMBERS.map(def => fromDB.find(m => Number(m.id)===def.id)||def);
+    render();
+  }
+});
 
-  const memberColor = (id) => members.find(m => m.id === id)?.color || "#999";
-  const eventsOnDay = (d) => {
-    const ds = dateStr(year, month, d);
-    return events.filter(e => e.date === ds && (filter === 0 || e.members?.includes(filter)));
-  };
+async function saveEvent(evt) {
+  const id = String(evt.id||uid());
+  const toSave = {...evt, id};
+  const exists = state.events.find(e=>e.id===id);
+  state.events = exists ? state.events.map(e=>e.id===id?toSave:e) : [...state.events, toSave];
+  state.modal = null;
+  render();
+  try { await setDoc(doc(db,"events",id), toSave); } catch(e) { console.error(e); }
+}
+
+async function deleteEvent(id) {
+  state.events = state.events.filter(e=>e.id!==id);
+  render();
+  try { await deleteDoc(doc(db,"events",String(id))); } catch(e) { console.error(e); }
+}
+
+async function toggleDone(id) {
+  state.events = state.events.map(e=>e.id===id?{...e,done:!e.done}:e);
+  render();
+  const evt = state.events.find(e=>e.id===id);
+  if (evt) try { await setDoc(doc(db,"events",String(id)), evt); } catch(e) { console.error(e); }
+}
+
+async function saveMember(id, name) {
+  if (!name.trim()) return;
+  state.members = state.members.map(m=>m.id===id?{...m,name:name.trim()}:m);
+  state.editingMemberId = null;
+  render();
+  const member = state.members.find(m=>m.id===id);
+  try { await setDoc(doc(db,"members",String(id)), member); } catch(e) { console.error(e); }
+}
+
+function render() {
+  const {year,month,selectedDate,events,members,filter,modal,editingMemberId,status} = state;
+  const daysInMonth = getDaysInMonth(year,month);
+  const firstDay = getFirstDay(year,month);
   const selectedEvents = events
-    .filter(e => e.date === selectedDate && (filter === 0 || e.members?.includes(filter)))
-    .sort((a,b) => (a.time||"").localeCompare(b.time||""));
+    .filter(e=>e.date===selectedDate&&(filter===0||e.members?.includes(filter)))
+    .sort((a,b)=>(a.time||"").localeCompare(b.time||""));
 
-  const daysInMonth = getDaysInMonth(year, month);
-  const firstDay = getFirstDay(year, month);
-  const prevMonth = () => { if(month===0){setMonth(11);setYear(y=>y-1);}else setMonth(m=>m-1); };
-  const nextMonth = () => { if(month===11){setMonth(0);setYear(y=>y+1);}else setMonth(m=>m+1); };
-  const openAdd = () => setModal({ mode:"add", event:{ type:"task", title:"", date:selectedDate, time:"", members:[], done:false, desc:"", place:"", duration:"" }});
-  const openEdit = (evt) => setModal({ mode:"edit", event:{...evt} });
-
-  return (
-    <div style={{ fontFamily:"sans-serif", background:"#F8F9FB", minHeight:"100vh", padding:20 }}>
-      <div style={{ maxWidth:900, margin:"0 auto" }}>
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
-          <div>
-            <h1 style={{ margin:0, fontSize:22, fontWeight:700, color:"#1a1a2e" }}>🏠 Calendario Familiar</h1>
-            <span style={{ fontSize:12, color:"#888" }}>{status}</span>
-          </div>
-          {!notifGranted
-            ? <button onClick={requestNotif} style={{ background:"#7C6AF7", color:"#fff", border:"none", borderRadius:8, padding:"8px 14px", fontSize:13, cursor:"pointer" }}>🔔 Activar avisos</button>
-            : <span style={{ fontSize:12, color:"#10B981" }}>🔔 Avisos activos</span>
-          }
+  document.getElementById("app").innerHTML = `
+    <div style="max-width:900px;margin:0 auto">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div>
+          <h1 style="font-size:22px;font-weight:700;color:#1a1a2e">🏠 Calendario Familiar</h1>
+          <span style="font-size:12px;color:#888">${status}</span>
         </div>
+      </div>
 
-        <div style={{ display:"flex", gap:8, marginBottom:16, flexWrap:"wrap", alignItems:"center" }}>
-          <button onClick={() => setFilter(0)} style={{ padding:"6px 14px", borderRadius:20, border:"none", background:filter===0?"#1a1a2e":"#e5e7eb", color:filter===0?"#fff":"#444", fontSize:13, cursor:"pointer" }}>Todos</button>
-          {members.map(m => (
-            <div key={m.id} style={{ display:"flex", alignItems:"center", gap:2 }}>
-              {editingMember?.id === m.id ? (
-                <div style={{ display:"flex", gap:4, alignItems:"center" }}>
-                  <input autoFocus value={editingMember.name}
-                    onChange={e => setEditingMember(em => ({...em, name:e.target.value}))}
-                    onKeyDown={e => { if(e.key==="Enter")saveMemberName(); if(e.key==="Escape")setEditingMember(null); }}
-                    style={{ padding:"4px 8px", borderRadius:8, border:`1.5px solid ${m.color}`, fontSize:13, width:90, outline:"none" }}/>
-                  <button onClick={saveMemberName} style={{ background:m.color, border:"none", borderRadius:8, color:"#fff", padding:"4px 8px", cursor:"pointer", fontSize:13 }}>✓</button>
-                  <button onClick={() => setEditingMember(null)} style={{ background:"#e5e7eb", border:"none", borderRadius:8, color:"#555", padding:"4px 8px", cursor:"pointer", fontSize:13 }}>✕</button>
+      <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
+        <button onclick="setFilter(0)" style="padding:6px 14px;border-radius:20px;border:none;background:${filter===0?'#1a1a2e':'#e5e7eb'};color:${filter===0?'#fff':'#444'};font-size:13px">Todos</button>
+        ${members.map(m=>`
+          <div style="display:flex;align-items:center;gap:2px">
+            ${editingMemberId===m.id ? `
+              <input id="edit-${m.id}" type="text" value="${m.name}" style="width:90px;padding:4px 8px;border-radius:8px;border:1.5px solid ${m.color};font-size:13px;outline:none"/>
+              <button onclick="confirmMember(${m.id})" style="background:${m.color};border:none;border-radius:8px;color:#fff;padding:4px 8px;font-size:13px">✓</button>
+              <button onclick="cancelMember()" style="background:#e5e7eb;border:none;border-radius:8px;color:#555;padding:4px 8px;font-size:13px">✕</button>
+            ` : `
+              <button onclick="setFilter(${m.id})" style="padding:6px 14px;border-radius:20px;border:none;background:${filter===m.id?m.color:'#e5e7eb'};color:${filter===m.id?'#fff':'#444'};font-size:13px">${m.name}</button>
+              <button onclick="editMember(${m.id})" style="background:none;border:none;font-size:12px;color:#bbb;padding:2px 3px">✏️</button>
+            `}
+          </div>
+        `).join("")}
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+            <button onclick="prevMonth()" style="background:none;border:none;font-size:18px;color:#555">‹</button>
+            <span style="font-weight:700;font-size:16px;color:#1a1a2e">${MONTHS[month]} ${year}</span>
+            <button onclick="nextMonth()" style="background:none;border:none;font-size:18px;color:#555">›</button>
+          </div>
+          <div class="cal-grid" style="margin-bottom:4px">
+            ${DAYS.map(d=>`<div style="text-align:center;font-size:12px;font-weight:600;color:#aaa;padding-bottom:4px">${d}</div>`).join("")}
+          </div>
+          <div class="cal-grid">
+            ${Array.from({length:firstDay}).map(()=>`<div></div>`).join("")}
+            ${Array.from({length:daysInMonth}).map((_,i)=>{
+              const d=i+1, ds=dateStr(year,month,d);
+              const evts=events.filter(e=>e.date===ds&&(filter===0||e.members?.includes(filter)));
+              const isToday=ds===todayStr(), isSel=ds===selectedDate;
+              return `<div class="cal-day" onclick="selectDate('${ds}')"
+                style="background:${isSel?'#7C6AF7':isToday?'#F0EEFF':'#fafafa'};border:1.5px solid ${isToday&&!isSel?'#7C6AF7':'transparent'}">
+                <div style="font-size:13px;font-weight:600;color:${isSel?'#fff':isToday?'#7C6AF7':'#333'};margin-bottom:2px">${d}</div>
+                <div style="display:flex;flex-wrap:wrap;gap:2px">
+                  ${evts.slice(0,3).map(e=>`<div style="width:7px;height:7px;border-radius:50%;background:${e.type==='appointment'?'#F43F5E':memberColor(e.members?.[0])}"></div>`).join("")}
+                  ${evts.length>3?`<span style="font-size:9px;color:${isSel?'#fff':'#999'}">+${evts.length-3}</span>`:""}
                 </div>
-              ) : (
-                <>
-                  <button onClick={() => setFilter(m.id)} style={{ padding:"6px 14px", borderRadius:20, border:"none", background:filter===m.id?m.color:"#e5e7eb", color:filter===m.id?"#fff":"#444", fontSize:13, cursor:"pointer" }}>{m.name}</button>
-                  <button onClick={() => setEditingMember({ id:m.id, name:m.name })} style={{ background:"none", border:"none", cursor:"pointer", fontSize:12, color:"#bbb", padding:"2px 3px" }}>✏️</button>
-                </>
-              )}
-            </div>
-          ))}
+              </div>`;
+            }).join("")}
+          </div>
+          <div style="margin-top:14px;display:flex;gap:14px;font-size:12px;color:#888">
+            <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#7C6AF7;margin-right:4px"></span>Tarea</span>
+            <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#F43F5E;margin-right:4px"></span>Cita</span>
+          </div>
         </div>
 
-        <div style={{ display:"grid", gridTemplateColumns:"1fr 320px", gap:16 }}>
-          <div style={{ background:"#fff", borderRadius:16, padding:20, boxShadow:"0 1px 6px #0001" }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
-              <button onClick={prevMonth} style={{ background:"none", border:"none", fontSize:18, cursor:"pointer" }}>‹</button>
-              <span style={{ fontWeight:700, fontSize:16, color:"#1a1a2e" }}>{MONTHS[month]} {year}</span>
-              <button onClick={nextMonth} style={{ background:"none", border:"none", fontSize:18, cursor:"pointer" }}>›</button>
+        <div class="card" style="display:flex;flex-direction:column">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+            <div>
+              <div style="font-weight:700;font-size:15px;color:#1a1a2e">${selectedDate===todayStr()?"Hoy":selectedDate}</div>
+              <div style="font-size:12px;color:#aaa">${selectedEvents.length} evento(s)</div>
             </div>
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:2, marginBottom:4 }}>
-              {DAYS.map(d => <div key={d} style={{ textAlign:"center", fontSize:12, fontWeight:600, color:"#aaa", paddingBottom:4 }}>{d}</div>)}
-            </div>
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:2 }}>
-              {Array.from({length:firstDay}).map((_,i) => <div key={`e${i}`}/>)}
-              {Array.from({length:daysInMonth}).map((_,i) => {
-                const d=i+1, ds=dateStr(year,month,d), evts=eventsOnDay(d);
-                const isToday=ds===todayStr(), isSel=ds===selectedDate;
-                return (
-                  <div key={d} onClick={() => setSelectedDate(ds)} style={{ minHeight:52, borderRadius:10, padding:"4px 5px", cursor:"pointer", background:isSel?"#7C6AF7":isToday?"#F0EEFF":"#fafafa", border:isToday&&!isSel?"1.5px solid #7C6AF7":"1.5px solid transparent" }}>
-                    <div style={{ fontSize:13, fontWeight:600, color:isSel?"#fff":isToday?"#7C6AF7":"#333", marginBottom:2 }}>{d}</div>
-                    <div style={{ display:"flex", flexWrap:"wrap", gap:2 }}>
-                      {evts.slice(0,3).map(e => <div key={e.id} style={{ width:7, height:7, borderRadius:"50%", background:e.type==="appointment"?"#F43F5E":memberColor(e.members?.[0]) }}/>)}
-                      {evts.length>3 && <div style={{ fontSize:9, color:isSel?"#fff":"#999" }}>+{evts.length-3}</div>}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            <div style={{ marginTop:14, display:"flex", gap:14, fontSize:12, color:"#888" }}>
-              <span><span style={{ display:"inline-block", width:8, height:8, borderRadius:"50%", background:"#7C6AF7", marginRight:4 }}/>Tarea</span>
-              <span><span style={{ display:"inline-block", width:8, height:8, borderRadius:"50%", background:"#F43F5E", marginRight:4 }}/>Cita</span>
-            </div>
+            <button onclick="openAdd()" style="background:#7C6AF7;color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:600">+ Añadir</button>
           </div>
-
-          <div style={{ background:"#fff", borderRadius:16, padding:20, boxShadow:"0 1px 6px #0001", display:"flex", flexDirection:"column" }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
-              <div>
-                <div style={{ fontWeight:700, fontSize:15, color:"#1a1a2e" }}>{selectedDate===todayStr()?"Hoy":selectedDate}</div>
-                <div style={{ fontSize:12, color:"#aaa" }}>{selectedEvents.length} evento(s)</div>
-              </div>
-              <button onClick={openAdd} style={{ background:"#7C6AF7", color:"#fff", border:"none", borderRadius:8, padding:"7px 12px", fontSize:13, cursor:"pointer", fontWeight:600 }}>+ Añadir</button>
-            </div>
-            <div style={{ flex:1, overflowY:"auto", display:"flex", flexDirection:"column", gap:10 }}>
-              {selectedEvents.length===0 && <div style={{ color:"#bbb", fontSize:14, textAlign:"center", marginTop:30 }}>Sin eventos este día</div>}
-              {selectedEvents.map(e => (
-                <div key={e.id} style={{ borderRadius:10, padding:"10px 12px", background:e.type==="appointment"?"#FFF1F4":"#F5F3FF", borderLeft:`3px solid ${e.type==="appointment"?"#F43F5E":"#7C6AF7"}` }}>
-                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
-                    <div style={{ flex:1 }}>
-                      <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-                        {e.type==="task" && <input type="checkbox" checked={!!e.done} onChange={() => toggleDone(e.id)} style={{ cursor:"pointer", accentColor:"#7C6AF7" }}/>}
-                        {e.type==="appointment" && <span>📌</span>}
-                        <span style={{ fontWeight:600, fontSize:14, color:"#1a1a2e", textDecoration:e.done?"line-through":"none", opacity:e.done?0.5:1 }}>{e.title}</span>
+          <div style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:10px">
+            ${selectedEvents.length===0
+              ? `<div style="color:#bbb;font-size:14px;text-align:center;margin-top:30px">Sin eventos este día</div>`
+              : selectedEvents.map(e=>`
+                <div style="border-radius:10px;padding:10px 12px;background:${e.type==='appointment'?'#FFF1F4':'#F5F3FF'};border-left:3px solid ${e.type==='appointment'?'#F43F5E':'#7C6AF7'}">
+                  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                    <div style="flex:1">
+                      <div style="display:flex;align-items:center;gap:6px">
+                        ${e.type==='task'?`<input type="checkbox" ${e.done?'checked':''} onchange="toggleDone('${e.id}')" style="cursor:pointer;accent-color:#7C6AF7;width:auto">`:'<span>📌</span>'}
+                        <span style="font-weight:600;font-size:14px;color:#1a1a2e;text-decoration:${e.done?'line-through':'none'};opacity:${e.done?.5:1}">${e.title}</span>
                       </div>
-                      {e.time && <div style={{ fontSize:12, color:"#888", marginTop:2, marginLeft:22 }}>🕐 {e.time}{e.duration?` · ${e.duration}`:""}</div>}
-                      {e.place && <div style={{ fontSize:12, color:"#888", marginLeft:22 }}>📍 {e.place}</div>}
-                      {e.desc && <div style={{ fontSize:12, color:"#999", marginTop:3, marginLeft:22 }}>{e.desc}</div>}
-                      <div style={{ display:"flex", gap:4, marginTop:5, marginLeft:22 }}>
-                        {(e.members||[]).map(mid => { const mem=members.find(m=>m.id===mid); return mem?<span key={mid} style={{ fontSize:11, background:mem.color+"22", color:mem.color, padding:"2px 7px", borderRadius:10, fontWeight:600 }}>{mem.name}</span>:null; })}
+                      ${e.time?`<div style="font-size:12px;color:#888;margin-top:2px;margin-left:22px">🕐 ${e.time}${e.duration?' · '+e.duration:''}</div>`:''}
+                      ${e.place?`<div style="font-size:12px;color:#888;margin-left:22px">📍 ${e.place}</div>`:''}
+                      ${e.desc?`<div style="font-size:12px;color:#999;margin-top:3px;margin-left:22px">${e.desc}</div>`:''}
+                      <div style="display:flex;gap:4px;margin-top:5px;margin-left:22px">
+                        ${(e.members||[]).map(mid=>{const mem=members.find(m=>m.id===mid);return mem?`<span style="font-size:11px;background:${mem.color}22;color:${mem.color};padding:2px 7px;border-radius:10px;font-weight:600">${mem.name}</span>`:''}).join("")}
                       </div>
                     </div>
-                    <div style={{ display:"flex", gap:4 }}>
-                      <button onClick={() => openEdit(e)} style={{ background:"none", border:"none", cursor:"pointer", fontSize:14 }}>✏️</button>
-                      <button onClick={() => deleteEvent(e.id)} style={{ background:"none", border:"none", cursor:"pointer", fontSize:14 }}>🗑️</button>
+                    <div style="display:flex;gap:4px">
+                      <button onclick='openEdit(${JSON.stringify(e).replace(/'/g,"&#39;")})' style="background:none;border:none;font-size:14px">✏️</button>
+                      <button onclick="deleteEvent('${e.id}')" style="background:none;border:none;font-size:14px">🗑️</button>
                     </div>
                   </div>
                 </div>
-              ))}
-            </div>
+              `).join("")}
           </div>
         </div>
       </div>
-      {modal && <EventModal modal={modal} members={members} onSave={saveEvent} onClose={() => setModal(null)}/>}
+
+      ${modal ? renderModal() : ""}
     </div>
-  );
+  `;
 }
 
-function EventModal({ modal, members, onSave, onClose }) {
-  const [evt, setEvt] = useState(modal.event);
-  const set = (k,v) => setEvt(e => ({...e,[k]:v}));
-  const toggleMember = (id) => setEvt(e => ({ ...e, members:e.members.includes(id)?e.members.filter(m=>m!==id):[...e.members,id] }));
-  return (
-    <div style={{ position:"fixed", inset:0, background:"#0005", display:"flex", alignItems:"center", justifyContent:"center", zIndex:100 }}>
-      <div style={{ background:"#fff", borderRadius:16, padding:28, width:360, boxShadow:"0 8px 32px #0002" }}>
-        <h3 style={{ margin:"0 0 18px", fontSize:17, color:"#1a1a2e" }}>{modal.mode==="add"?"Nuevo evento":"Editar evento"}</h3>
-        <div style={{ marginBottom:12 }}>
-          <label style={lbl}>Tipo</label>
-          <div style={{ display:"flex", gap:8 }}>
-            {["task","appointment"].map(t => (
-              <button key={t} onClick={() => set("type",t)} style={{ flex:1, padding:7, borderRadius:8, border:"none", background:evt.type===t?"#7C6AF7":"#f0f0f0", color:evt.type===t?"#fff":"#555", cursor:"pointer", fontWeight:600, fontSize:13 }}>
-                {t==="task"?"✅ Tarea":"📌 Cita"}
-              </button>
-            ))}
+function renderModal() {
+  const {modal, members} = state;
+  const e = modal.event;
+  return `
+    <div class="modal-bg" onclick="bgClose(event)">
+      <div class="modal">
+        <h3 style="margin:0 0 18px;font-size:17px;color:#1a1a2e">${modal.mode==='add'?'Nuevo evento':'Editar evento'}</h3>
+        <div style="margin-bottom:12px">
+          <label>Tipo</label>
+          <div style="display:flex;gap:8px">
+            <button onclick="setField('type','task')" style="flex:1;padding:7px;border-radius:8px;border:none;background:${e.type==='task'?'#7C6AF7':'#f0f0f0'};color:${e.type==='task'?'#fff':'#555'};font-weight:600;font-size:13px">✅ Tarea</button>
+            <button onclick="setField('type','appointment')" style="flex:1;padding:7px;border-radius:8px;border:none;background:${e.type==='appointment'?'#7C6AF7':'#f0f0f0'};color:${e.type==='appointment'?'#fff':'#555'};font-weight:600;font-size:13px">📌 Cita</button>
           </div>
         </div>
-        <div style={{ marginBottom:12 }}>
-          <label style={lbl}>Título</label>
-          <input value={evt.title} onChange={e => set("title",e.target.value)} placeholder="Ej: Ir al médico" style={inp}/>
+        <div style="margin-bottom:12px">
+          <label>Título</label>
+          <input type="text" id="f-title" value="${e.title||''}" oninput="setField('title',this.value)" placeholder="Ej: Ir al médico"/>
         </div>
-        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:12 }}>
-          <div><label style={lbl}>Fecha</label><input type="date" value={evt.date} onChange={e => set("date",e.target.value)} style={inp}/></div>
-          <div><label style={lbl}>Hora</label><input type="time" value={evt.time} onChange={e => set("time",e.target.value)} style={inp}/></div>
+        <div class="two-col">
+          <div><label>Fecha</label><input type="date" value="${e.date||''}" oninput="setField('date',this.value)"/></div>
+          <div><label>Hora</label><input type="time" value="${e.time||''}" oninput="setField('time',this.value)"/></div>
         </div>
-        {evt.type==="appointment" && (
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:12 }}>
-            <div><label style={lbl}>Lugar</label><input value={evt.place} onChange={e => set("place",e.target.value)} placeholder="Clínica..." style={inp}/></div>
-            <div><label style={lbl}>Duración</label><input value={evt.duration} onChange={e => set("duration",e.target.value)} placeholder="Ej: 1h" style={inp}/></div>
+        ${e.type==='appointment'?`
+        <div class="two-col">
+          <div><label>Lugar</label><input type="text" value="${e.place||''}" oninput="setField('place',this.value)" placeholder="Clínica..."/></div>
+          <div><label>Duración</label><input type="text" value="${e.duration||''}" oninput="setField('duration',this.value)" placeholder="Ej: 1h"/></div>
+        </div>`:''}
+        <div style="margin-bottom:12px">
+          <label>Descripción (opcional)</label>
+          <input type="text" value="${e.desc||''}" oninput="setField('desc',this.value)" placeholder="Notas adicionales"/>
+        </div>
+        <div style="margin-bottom:18px">
+          <label>Miembros</label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            ${members.map(m=>`
+              <button onclick="toggleMember(${m.id})" style="padding:5px 12px;border-radius:20px;border:none;background:${(e.members||[]).includes(m.id)?m.color:'#f0f0f0'};color:${(e.members||[]).includes(m.id)?'#fff':'#555'};font-size:13px;font-weight:600">${m.name}</button>
+            `).join("")}
           </div>
-        )}
-        <div style={{ marginBottom:12 }}>
-          <label style={lbl}>Descripción (opcional)</label>
-          <input value={evt.desc} onChange={e => set("desc",e.target.value)} placeholder="Notas adicionales" style={inp}/>
         </div>
-        <div style={{ marginBottom:18 }}>
-          <label style={lbl}>Miembros</label>
-          <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-            {members.map(m => (
-              <button key={m.id} onClick={() => toggleMember(m.id)} style={{ padding:"5px 12px", borderRadius:20, border:"none", background:evt.members.includes(m.id)?m.color:"#f0f0f0", color:evt.members.includes(m.id)?"#fff":"#555", fontSize:13, cursor:"pointer", fontWeight:600 }}>{m.name}</button>
-            ))}
-          </div>
-        </div>
-        <div style={{ display:"flex", gap:10 }}>
-          <button onClick={onClose} style={{ flex:1, padding:10, borderRadius:9, border:"none", background:"#f0f0f0", color:"#555", cursor:"pointer", fontWeight:600 }}>Cancelar</button>
-          <button onClick={() => evt.title && onSave(evt)} style={{ flex:1, padding:10, borderRadius:9, border:"none", background:"#7C6AF7", color:"#fff", cursor:"pointer", fontWeight:600, opacity:evt.title?1:0.5 }}>Guardar</button>
+        <div style="display:flex;gap:10px">
+          <button onclick="closeModal()" style="flex:1;padding:10px;border-radius:9px;border:none;background:#f0f0f0;color:#555;font-weight:600">Cancelar</button>
+          <button onclick="submitModal()" style="flex:1;padding:10px;border-radius:9px;border:none;background:#7C6AF7;color:#fff;font-weight:600;opacity:${e.title?1:.5}">Guardar</button>
         </div>
       </div>
     </div>
-  );
+  `;
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+// Global handlers
+window.setFilter = f => setState({filter:f});
+window.selectDate = d => setState({selectedDate:d});
+window.prevMonth = () => state.month===0 ? setState({month:11,year:state.year-1}) : setState({month:state.month-1});
+window.nextMonth = () => state.month===11 ? setState({month:0,year:state.year+1}) : setState({month:state.month+1});
+window.openAdd = () => setState({modal:{mode:"add",event:{type:"task",title:"",date:state.selectedDate,time:"",members:[],done:false,desc:"",place:"",duration:""}}});
+window.openEdit = evt => setState({modal:{mode:"edit",event:{...evt}}});
+window.closeModal = () => setState({modal:null});
+window.bgClose = e => { if(e.target.classList.contains("modal-bg")) setState({modal:null}); };
+window.deleteEvent = id => deleteEvent(id);
+window.toggleDone = id => toggleDone(id);
+window.setField = (k,v) => { if(!state.modal) return; setState({modal:{...state.modal,event:{...state.modal.event,[k]:v}}}); };
+window.toggleMember = id => {
+  if(!state.modal) return;
+  const ms = state.modal.event.members||[];
+  setState({modal:{...state.modal,event:{...state.modal.event,members:ms.includes(id)?ms.filter(m=>m!==id):[...ms,id]}}});
+};
+window.submitModal = () => { if(state.modal?.event?.title) saveEvent(state.modal.event); };
+window.editMember = id => setState({editingMemberId:id});
+window.cancelMember = () => setState({editingMemberId:null});
+window.confirmMember = id => {
+  const val = document.getElementById(`edit-${id}`)?.value;
+  if(val) saveMember(id, val);
+};
+
+render();
 </script>
 </body>
 </html>
