@@ -58,9 +58,11 @@ let state = {
   filter: 0,
   modal: null,
   editingMemberId: null,
-  editingMemberName: "",
-  status: "Conectando…"
+  status: "Conectando…",
+  notifGranted: false
 };
+
+const notified = new Set();
 
 function todayStr() {
   const t = new Date();
@@ -73,13 +75,35 @@ function getDaysInMonth(y,m) { return new Date(y,m+1,0).getDate(); }
 function getFirstDay(y,m) { const d=new Date(y,m,1).getDay(); return d===0?6:d-1; }
 function uid() { return Math.random().toString(36).slice(2,10); }
 function memberColor(id) { return state.members.find(m=>m.id===id)?.color||"#999"; }
-
 function setState(patch) { state = {...state, ...patch}; render(); }
+
+// Notification checker
+function checkNotifications() {
+  if (!state.notifGranted) return;
+  const now = new Date();
+  const todayS = todayStr();
+  state.events.forEach(e => {
+    if (!e.time || e.date !== todayS) return;
+    const [h, m] = e.time.split(":").map(Number);
+    const eventTime = new Date();
+    eventTime.setHours(h, m, 0, 0);
+    const diff = eventTime - now;
+    const key = `${e.id}-notif`;
+    if (diff > 55*60*1000 && diff < 65*60*1000 && !notified.has(key)) {
+      notified.add(key);
+      new Notification(`${e.type==="appointment"?"📌 Cita":"📋 Tarea"}: ${e.title}`, {
+        body: `En 1 hora · ${e.time}${e.place ? " · "+e.place : ""}`
+      });
+    }
+  });
+}
+setInterval(checkNotifications, 60000);
 
 // Firebase listeners
 onSnapshot(collection(db,"events"), snap => {
   state.events = snap.docs.map(d => ({id:d.id,...d.data()}));
   state.status = "🟢 Sincronizado";
+  checkNotifications();
   render();
 }, () => { state.status = "🔴 Sin conexión"; render(); });
 
@@ -92,6 +116,25 @@ onSnapshot(collection(db,"members"), snap => {
     render();
   }
 });
+
+// Check if already granted on load
+if ("Notification" in window && Notification.permission==="granted") {
+  state.notifGranted = true;
+}
+
+async function requestNotif() {
+  if (!("Notification" in window)) {
+    alert("Tu navegador no soporta notificaciones.");
+    return;
+  }
+  const p = await Notification.requestPermission();
+  if (p==="granted") {
+    setState({notifGranted: true});
+    new Notification("🏠 Calendario Familiar", { body: "¡Avisos activados! Te avisaremos 1 hora antes de cada evento." });
+  } else {
+    alert("Permiso denegado. Activa las notificaciones en los ajustes de tu navegador.");
+  }
+}
 
 async function saveEvent(evt) {
   const id = String(evt.id||uid());
@@ -126,7 +169,7 @@ async function saveMember(id, name) {
 }
 
 function render() {
-  const {year,month,selectedDate,events,members,filter,modal,editingMemberId,status} = state;
+  const {year,month,selectedDate,events,members,filter,modal,editingMemberId,status,notifGranted} = state;
   const daysInMonth = getDaysInMonth(year,month);
   const firstDay = getFirstDay(year,month);
   const selectedEvents = events
@@ -135,11 +178,16 @@ function render() {
 
   document.getElementById("app").innerHTML = `
     <div style="max-width:900px;margin:0 auto">
+
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <div>
           <h1 style="font-size:22px;font-weight:700;color:#1a1a2e">🏠 Calendario Familiar</h1>
           <span style="font-size:12px;color:#888">${status}</span>
         </div>
+        ${notifGranted
+          ? `<span style="font-size:12px;color:#10B981">🔔 Avisos activos</span>`
+          : `<button onclick="requestNotif()" style="background:#7C6AF7;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:13px">🔔 Activar avisos</button>`
+        }
       </div>
 
       <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
@@ -280,7 +328,7 @@ function renderModal() {
   `;
 }
 
-// Global handlers
+window.requestNotif = requestNotif;
 window.setFilter = f => setState({filter:f});
 window.selectDate = d => setState({selectedDate:d});
 window.prevMonth = () => state.month===0 ? setState({month:11,year:state.year-1}) : setState({month:state.month-1});
