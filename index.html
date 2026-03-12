@@ -11,18 +11,20 @@
     .grid { display: grid; grid-template-columns: 1fr 320px; gap: 16px; }
     .card { background: #fff; border-radius: 16px; padding: 20px; box-shadow: 0 1px 6px rgba(0,0,0,.06); }
     .cal-grid { display: grid; grid-template-columns: repeat(7,1fr); gap: 2px; }
-    .cal-day { min-height: 52px; border-radius: 10px; padding: 4px 5px; cursor: pointer; }
+    .cal-day { min-height: 52px; border-radius: 10px; padding: 4px 5px; cursor: pointer; position: relative; overflow: hidden; }
     .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; z-index: 100; }
-    .modal { background: #fff; border-radius: 16px; padding: 28px; width: 360px; box-shadow: 0 8px 32px rgba(0,0,0,.12); max-height: 90vh; overflow-y: auto; }
+    .modal { background: #fff; border-radius: 16px; padding: 28px; width: 380px; box-shadow: 0 8px 32px rgba(0,0,0,.12); max-height: 90vh; overflow-y: auto; }
     .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
     .finp { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1.5px solid #e5e7eb; font-size: 14px; outline: none; background: #fafafa; box-sizing: border-box; }
     label { display: block; font-size: 12px; font-weight: 600; color: #888; margin-bottom: 5px; }
+    .vac-bar { position: absolute; bottom: 0; left: 0; right: 0; height: 5px; }
     @media (max-width: 650px) { .grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
 <div id="app"><p style="padding:20px;color:#888">Cargando...</p></div>
 <div id="modal-root"></div>
+<div id="vac-root"></div>
 
 <script type="module">
 import { initializeApp, getApps } from "https://cdn.jsdelivr.net/npm/firebase@10.12.0/app/+esm";
@@ -47,8 +49,8 @@ const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const DEFAULT_MEMBERS = [
-  { id: 1, name: "Mamá",    color: "#7C6AF7", email: "evagp85@hotmail.com" },
-  { id: 2, name: "Papá",    color: "#F97316", email: "luis_cm_cc@msn.com" },
+  { id: 1, name: "Mamá",     color: "#7C6AF7", email: "evagp85@hotmail.com" },
+  { id: 2, name: "Papá",     color: "#F97316", email: "luis_cm_cc@msn.com" },
   { id: 3, name: "Hijo/a 1", color: "#10B981", email: "" },
   { id: 4, name: "Hijo/a 2", color: "#F43F5E", email: "" },
 ];
@@ -57,11 +59,13 @@ const DAYS   = ["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"];
 const MONTHS = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 
 let modalData = null;
+let vacModal  = false;
 let state = {
   year: new Date().getFullYear(),
   month: new Date().getMonth(),
   selectedDate: todayStr(),
   events: [],
+  vacations: [],   // [{id, memberId, date}]
   members: [...DEFAULT_MEMBERS],
   filter: 0,
   editingMemberId: null,
@@ -83,142 +87,282 @@ function uid()               { return Math.random().toString(36).slice(2,10); }
 function memberColor(id)     { return state.members.find(m=>m.id===id)?.color||"#999"; }
 function setState(patch)     { state={...state,...patch}; render(); }
 
+// Dates between two strings inclusive
+function datesBetween(from, to) {
+  const dates=[], cur=new Date(from);
+  const end=new Date(to);
+  while(cur<=end){
+    dates.push(cur.toISOString().slice(0,10));
+    cur.setDate(cur.getDate()+1);
+  }
+  return dates;
+}
+
+// Vacation colors for a given date
+function vacColorsForDate(ds) {
+  const mids=[...new Set(state.vacations.filter(v=>v.date===ds).map(v=>v.memberId))];
+  return mids.map(id=>memberColor(id));
+}
+
 // ── Email ─────────────────────────────────────────────────
 async function sendEmailReminder(evt, memberEmail, memberName, when) {
   if (!memberEmail) return;
   try {
     await emailjs.send(EMAILJS_SERVICE, EMAILJS_TEMPLATE, {
-      to_email: memberEmail,
-      to_name:  memberName,
-      title:    evt.title,
-      time:     evt.time,
-      place:    evt.place || "Sin lugar especificado",
-      date:     evt.date,
-      type:     evt.type==="appointment" ? "Cita" : "Tarea",
-      when,
+      to_email: memberEmail, to_name: memberName,
+      title: evt.title, time: evt.time,
+      place: evt.place||"Sin lugar especificado",
+      date: evt.date, type: evt.type==="appointment"?"Cita":"Tarea", when,
     });
-    console.log(`✉️ Email enviado a ${memberEmail} (${when})`);
   } catch(e) { console.error("EmailJS error:", e); }
 }
 
-// ── Notification checker (runs every minute) ──────────────
+// ── Notifications ─────────────────────────────────────────
 function checkNotifications() {
-  const now     = new Date();
-  const todayS  = todayStr();
-  const tomorrow = new Date(now);
-  tomorrow.setDate(tomorrow.getDate()+1);
-  const tomorrowS = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth()+1).padStart(2,'0')}-${String(tomorrow.getDate()).padStart(2,'0')}`;
-
-  state.events.forEach(e => {
-    if (!e.time) return;
-
-    // 1) Day-before at 20:00
-    if (e.date === tomorrowS) {
-      const key = `${e.id}-dayBefore`;
-      if (now.getHours()===20 && now.getMinutes()<2 && !notified.has(key)) {
+  const now=new Date(), todayS=todayStr();
+  const tomorrow=new Date(now); tomorrow.setDate(tomorrow.getDate()+1);
+  const tomorrowS=`${tomorrow.getFullYear()}-${String(tomorrow.getMonth()+1).padStart(2,'0')}-${String(tomorrow.getDate()).padStart(2,'0')}`;
+  state.events.forEach(e=>{
+    if(!e.time) return;
+    if(e.date===tomorrowS){
+      const key=`${e.id}-dayBefore`;
+      if(now.getHours()===20&&now.getMinutes()<2&&!notified.has(key)){
         notified.add(key);
-        if (state.notifGranted) new Notification(`📅 Mañana: ${e.title}`, { body: `A las ${e.time}${e.place?" · "+e.place:""}` });
-        (e.members||[]).forEach(mid => {
-          const mem = state.members.find(m=>m.id===mid);
-          if (mem?.email) sendEmailReminder(e, mem.email, mem.name, "mañana");
-        });
+        if(state.notifGranted) new Notification(`📅 Mañana: ${e.title}`,{body:`A las ${e.time}${e.place?" · "+e.place:""}`});
+        (e.members||[]).forEach(mid=>{const mem=state.members.find(m=>m.id===mid);if(mem?.email)sendEmailReminder(e,mem.email,mem.name,"mañana");});
       }
     }
-
-    if (e.date !== todayS) return;
-    const [h,m] = e.time.split(":").map(Number);
-    const eventTime = new Date(); eventTime.setHours(h,m,0,0);
-    const diff = eventTime - now;
-
-    // 2) Same-day at 8:00
-    const key8 = `${e.id}-8am`;
-    if (now.getHours()===8 && now.getMinutes()<2 && !notified.has(key8)) {
+    if(e.date!==todayS) return;
+    const [h,m]=e.time.split(":").map(Number);
+    const et=new Date(); et.setHours(h,m,0,0);
+    const diff=et-now;
+    const key8=`${e.id}-8am`;
+    if(now.getHours()===8&&now.getMinutes()<2&&!notified.has(key8)){
       notified.add(key8);
-      if (state.notifGranted) new Notification(`📅 Hoy: ${e.title}`, { body: `A las ${e.time}${e.place?" · "+e.place:""}` });
-      (e.members||[]).forEach(mid => {
-        const mem = state.members.find(m=>m.id===mid);
-        if (mem?.email) sendEmailReminder(e, mem.email, mem.name, "hoy");
-      });
+      if(state.notifGranted) new Notification(`📅 Hoy: ${e.title}`,{body:`A las ${e.time}${e.place?" · "+e.place:""}`});
+      (e.members||[]).forEach(mid=>{const mem=state.members.find(m=>m.id===mid);if(mem?.email)sendEmailReminder(e,mem.email,mem.name,"hoy");});
     }
-
-    // 3) 1 hour before
-    const key1h = `${e.id}-1h`;
-    if (diff>55*60*1000 && diff<65*60*1000 && !notified.has(key1h)) {
+    const key1h=`${e.id}-1h`;
+    if(diff>55*60*1000&&diff<65*60*1000&&!notified.has(key1h)){
       notified.add(key1h);
-      if (state.notifGranted) new Notification(`${e.type==="appointment"?"📌 Cita":"📋 Tarea"}: ${e.title}`, { body: `En 1 hora · ${e.time}${e.place?" · "+e.place:""}` });
-      (e.members||[]).forEach(mid => {
-        const mem = state.members.find(m=>m.id===mid);
-        if (mem?.email) sendEmailReminder(e, mem.email, mem.name, "en 1 hora");
-      });
+      if(state.notifGranted) new Notification(`${e.type==="appointment"?"📌 Cita":"📋 Tarea"}: ${e.title}`,{body:`En 1 hora · ${e.time}${e.place?" · "+e.place:""}`});
+      (e.members||[]).forEach(mid=>{const mem=state.members.find(m=>m.id===mid);if(mem?.email)sendEmailReminder(e,mem.email,mem.name,"en 1 hora");});
     }
   });
 }
-setInterval(checkNotifications, 60000);
+setInterval(checkNotifications,60000);
 
 // ── Firebase ──────────────────────────────────────────────
-onSnapshot(collection(db,"events"), snap => {
-  state.events = snap.docs.map(d=>({id:d.id,...d.data()}));
-  state.status = "🟢 Sincronizado";
-  checkNotifications();
-  render();
-}, () => { state.status="🔴 Sin conexión"; render(); });
+onSnapshot(collection(db,"events"),snap=>{
+  state.events=snap.docs.map(d=>({id:d.id,...d.data()}));
+  state.status="🟢 Sincronizado"; checkNotifications(); render();
+},()=>{state.status="🔴 Sin conexión";render();});
 
-onSnapshot(collection(db,"members"), snap => {
-  if (snap.empty) {
-    DEFAULT_MEMBERS.forEach(m=>setDoc(doc(db,"members",String(m.id)),m));
-  } else {
-    const fromDB = snap.docs.map(d=>({...d.data()}));
-    state.members = DEFAULT_MEMBERS.map(def=>({
-      ...def,
-      ...(fromDB.find(m=>Number(m.id)===def.id)||{}),
-      email: def.email  // always keep hardcoded emails
-    }));
+onSnapshot(collection(db,"members"),snap=>{
+  if(snap.empty){DEFAULT_MEMBERS.forEach(m=>setDoc(doc(db,"members",String(m.id)),m));}
+  else{
+    const fromDB=snap.docs.map(d=>({...d.data()}));
+    state.members=DEFAULT_MEMBERS.map(def=>({...def,...(fromDB.find(m=>Number(m.id)===def.id)||{}),email:def.email}));
     render();
   }
 });
 
-if ("Notification" in window && Notification.permission==="granted") state.notifGranted=true;
+onSnapshot(collection(db,"vacations"),snap=>{
+  state.vacations=snap.docs.map(d=>({id:d.id,...d.data()}));
+  render();
+});
 
-async function requestNotif() {
-  if (!("Notification" in window)) { alert("Tu navegador no soporta notificaciones."); return; }
-  const p = await Notification.requestPermission();
-  if (p==="granted") {
-    setState({notifGranted:true});
-    new Notification("🏠 Calendario Familiar", { body:"¡Avisos activados! Te avisaremos 1 hora antes de cada evento." });
-  } else {
-    alert("Permiso denegado. Activa las notificaciones en los ajustes de tu navegador.");
-  }
+if("Notification"in window&&Notification.permission==="granted") state.notifGranted=true;
+
+async function requestNotif(){
+  if(!("Notification"in window)){alert("Tu navegador no soporta notificaciones.");return;}
+  const p=await Notification.requestPermission();
+  if(p==="granted") setState({notifGranted:true});
+  else alert("Permiso denegado. Activa las notificaciones en los ajustes.");
 }
 
-// ── CRUD ──────────────────────────────────────────────────
-async function saveEvent(evt) {
-  const id=String(evt.id||uid()), toSave={...evt,id};
+// ── CRUD Events ───────────────────────────────────────────
+async function saveEvent(evt){
+  const id=String(evt.id||uid()),toSave={...evt,id};
   const exists=state.events.find(e=>e.id===id);
   state.events=exists?state.events.map(e=>e.id===id?toSave:e):[...state.events,toSave];
   modalData=null; renderModal(); render();
-  try { await setDoc(doc(db,"events",id),toSave); } catch(e){ console.error(e); }
+  try{await setDoc(doc(db,"events",id),toSave);}catch(e){console.error(e);}
 }
-async function deleteEvent(id) {
+async function deleteEvent(id){
   state.events=state.events.filter(e=>e.id!==id); render();
-  try { await deleteDoc(doc(db,"events",String(id))); } catch(e){ console.error(e); }
+  try{await deleteDoc(doc(db,"events",String(id)));}catch(e){console.error(e);}
 }
-async function toggleDone(id) {
+async function toggleDone(id){
   state.events=state.events.map(e=>e.id===id?{...e,done:!e.done}:e); render();
   const evt=state.events.find(e=>e.id===id);
-  if(evt) try { await setDoc(doc(db,"events",String(id)),evt); } catch(e){ console.error(e); }
+  if(evt) try{await setDoc(doc(db,"events",String(id)),evt);}catch(e){console.error(e);}
 }
-async function saveMember(id,name) {
+async function saveMember(id,name){
   if(!name.trim()) return;
   state.members=state.members.map(m=>m.id===id?{...m,name:name.trim()}:m);
   state.editingMemberId=null; render();
   const member=state.members.find(m=>m.id===id);
-  try { await setDoc(doc(db,"members",String(id)),member); } catch(e){ console.error(e); }
+  try{await setDoc(doc(db,"members",String(id)),member);}catch(e){console.error(e);}
 }
 
-// ── Modal (separate div — no focus loss) ─────────────────
+// ── CRUD Vacations ────────────────────────────────────────
+async function saveVacations(memberId, dates) {
+  // Remove existing for this member first, then add new
+  const toDelete = state.vacations.filter(v=>v.memberId===memberId);
+  for(const v of toDelete) await deleteDoc(doc(db,"vacations",v.id));
+  const newVacs=[];
+  for(const date of dates){
+    const id=uid();
+    const vac={id,memberId,date};
+    await setDoc(doc(db,"vacations",id),vac);
+    newVacs.push(vac);
+  }
+  state.vacations=[...state.vacations.filter(v=>v.memberId!==memberId),...newVacs];
+  render();
+}
+
+// ── Vacation Modal ────────────────────────────────────────
+function renderVacModal() {
+  const root=document.getElementById("vac-root");
+  if(!vacModal){root.innerHTML="";return;}
+
+  // Get current vacation dates per member
+  const memberVacs={};
+  state.members.forEach(m=>{
+    memberVacs[m.id]=state.vacations.filter(v=>v.memberId===m.id).map(v=>v.date).sort();
+  });
+
+  root.innerHTML=`
+    <div class="modal-bg" id="vac-bg">
+      <div class="modal" style="width:420px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+          <h3 style="font-size:17px;color:#1a1a2e">🏖️ Vacaciones</h3>
+          <button id="vac-close" style="background:none;border:none;font-size:18px;color:#aaa">✕</button>
+        </div>
+
+        ${state.members.map(m=>`
+          <div style="margin-bottom:20px;padding:14px;border-radius:12px;background:#fafafa;border:1.5px solid #e5e7eb">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+              <span style="width:12px;height:12px;border-radius:50%;background:${m.color};display:inline-block"></span>
+              <span style="font-weight:700;font-size:14px;color:#1a1a2e">${m.name}</span>
+            </div>
+            <div style="margin-bottom:10px">
+              <label>Añadir rango de fechas</label>
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                <input type="date" id="vac-from-${m.id}" class="finp" style="flex:1;min-width:120px"/>
+                <span style="font-size:12px;color:#888">hasta</span>
+                <input type="date" id="vac-to-${m.id}" class="finp" style="flex:1;min-width:120px"/>
+                <button data-vac-range="${m.id}" style="background:${m.color};color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px">+ Rango</button>
+              </div>
+            </div>
+            <div style="margin-bottom:10px">
+              <label>Añadir día suelto</label>
+              <div style="display:flex;gap:6px">
+                <input type="date" id="vac-single-${m.id}" class="finp"/>
+                <button data-vac-single="${m.id}" style="background:${m.color};color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px">+ Día</button>
+              </div>
+            </div>
+            <div id="vac-list-${m.id}">
+              ${memberVacs[m.id].length===0
+                ?`<div style="font-size:12px;color:#bbb">Sin vacaciones añadidas</div>`
+                :`<div style="font-size:12px;color:#888;margin-bottom:4px">Días marcados: ${memberVacs[m.id].length}</div>
+                  <div style="display:flex;flex-wrap:wrap;gap:4px">
+                    ${groupRanges(memberVacs[m.id]).map(r=>`
+                      <span style="font-size:11px;background:${m.color}22;color:${m.color};padding:3px 8px;border-radius:8px;font-weight:600">
+                        ${r}
+                        <button data-vac-del="${m.id}" data-range="${r}" style="background:none;border:none;color:${m.color};font-size:11px;cursor:pointer;margin-left:2px">✕</button>
+                      </span>
+                    `).join("")}
+                  </div>`
+              }
+            </div>
+          </div>
+        `).join("")}
+
+        <button id="vac-done" style="width:100%;padding:10px;border-radius:9px;border:none;background:#7C6AF7;color:#fff;font-weight:600;font-size:14px">Listo</button>
+      </div>
+    </div>`;
+
+  document.getElementById("vac-bg").addEventListener("click",e=>{if(e.target.id==="vac-bg"){vacModal=false;renderVacModal();}});
+  document.getElementById("vac-close").addEventListener("click",()=>{vacModal=false;renderVacModal();});
+  document.getElementById("vac-done").addEventListener("click",()=>{vacModal=false;renderVacModal();});
+
+  // Range buttons
+  document.querySelectorAll("[data-vac-range]").forEach(btn=>{
+    btn.addEventListener("click",async()=>{
+      const mid=Number(btn.dataset.vacRange);
+      const from=document.getElementById(`vac-from-${mid}`).value;
+      const to=document.getElementById(`vac-to-${mid}`).value;
+      if(!from||!to||from>to){alert("Selecciona un rango válido.");return;}
+      const newDates=datesBetween(from,to);
+      const existing=state.vacations.filter(v=>v.memberId===mid).map(v=>v.date);
+      const merged=[...new Set([...existing,...newDates])];
+      await saveVacations(mid,merged);
+      renderVacModal();
+    });
+  });
+
+  // Single day buttons
+  document.querySelectorAll("[data-vac-single]").forEach(btn=>{
+    btn.addEventListener("click",async()=>{
+      const mid=Number(btn.dataset.vacSingle);
+      const date=document.getElementById(`vac-single-${mid}`).value;
+      if(!date){alert("Selecciona un día.");return;}
+      const existing=state.vacations.filter(v=>v.memberId===mid).map(v=>v.date);
+      if(!existing.includes(date)){
+        const merged=[...existing,date];
+        await saveVacations(mid,merged);
+        renderVacModal();
+      }
+    });
+  });
+
+  // Delete range buttons
+  document.querySelectorAll("[data-vac-del]").forEach(btn=>{
+    btn.addEventListener("click",async()=>{
+      const mid=Number(btn.dataset.vacDel);
+      const range=btn.dataset.range;
+      const existing=state.vacations.filter(v=>v.memberId===mid).map(v=>v.date);
+      let toRemove=[];
+      if(range.includes(" → ")){
+        const [f,t]=range.split(" → ");
+        toRemove=datesBetween(f,t);
+      } else {
+        toRemove=[range];
+      }
+      const merged=existing.filter(d=>!toRemove.includes(d));
+      await saveVacations(mid,merged);
+      renderVacModal();
+    });
+  });
+}
+
+// Group consecutive dates into ranges for display
+function groupRanges(dates) {
+  if(!dates.length) return [];
+  const sorted=[...dates].sort();
+  const ranges=[];
+  let start=sorted[0], prev=sorted[0];
+  for(let i=1;i<sorted.length;i++){
+    const cur=new Date(sorted[i]);
+    const prv=new Date(prev);
+    prv.setDate(prv.getDate()+1);
+    if(cur.toISOString().slice(0,10)===prv.toISOString().slice(0,10)){
+      prev=sorted[i];
+    } else {
+      ranges.push(start===prev?start:`${start} → ${prev}`);
+      start=sorted[i]; prev=sorted[i];
+    }
+  }
+  ranges.push(start===prev?start:`${start} → ${prev}`);
+  return ranges;
+}
+
+// ── Event Modal ───────────────────────────────────────────
 function renderModal() {
   const root=document.getElementById("modal-root");
-  if(!modalData){ root.innerHTML=""; return; }
+  if(!modalData){root.innerHTML="";return;}
   const {mode,event:e}=modalData;
   const members=state.members;
   root.innerHTML=`
@@ -252,7 +396,7 @@ function renderModal() {
         </div>
         <div style="margin-bottom:18px">
           <label>Miembros</label>
-          <div id="member-btns" style="display:flex;gap:8px;flex-wrap:wrap">
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
             ${members.map(m=>`<button data-mid="${m.id}" style="padding:5px 12px;border-radius:20px;border:none;background:${(e.members||[]).includes(m.id)?m.color:'#f0f0f0'};color:${(e.members||[]).includes(m.id)?'#fff':'#555'};font-size:13px;font-weight:600">${m.name}</button>`).join("")}
           </div>
         </div>
@@ -294,34 +438,34 @@ function renderModal() {
       const ms=modalData.event.members||[];
       modalData.event.members=ms.includes(id)?ms.filter(m=>m!==id):[...ms,id];
       const mem=state.members.find(m=>m.id===id);
-      if(mem){ btn.style.background=modalData.event.members.includes(id)?mem.color:"#f0f0f0"; btn.style.color=modalData.event.members.includes(id)?"#fff":"#555"; }
+      if(mem){btn.style.background=modalData.event.members.includes(id)?mem.color:"#f0f0f0";btn.style.color=modalData.event.members.includes(id)?"#fff":"#555";}
     });
   });
 }
-function closeModal(){ modalData=null; renderModal(); }
+function closeModal(){modalData=null;renderModal();}
 
 // ── Main render ───────────────────────────────────────────
 function render() {
   const {year,month,selectedDate,events,members,filter,editingMemberId,status,notifGranted}=state;
-  const daysInMonth=getDaysInMonth(year,month), firstDay=getFirstDay(year,month);
+  const daysInMonth=getDaysInMonth(year,month),firstDay=getFirstDay(year,month);
   const selectedEvents=events
     .filter(e=>e.date===selectedDate&&(filter===0||e.members?.includes(filter)))
     .sort((a,b)=>(a.time||"").localeCompare(b.time||""));
 
   document.getElementById("app").innerHTML=`
     <div style="max-width:900px;margin:0 auto">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
         <div>
           <h1 style="font-size:22px;font-weight:700;color:#1a1a2e">🏠 Calendario Familiar</h1>
           <span style="font-size:12px;color:#888">${status}</span>
         </div>
-        ${notifGranted
-          ? `<div style="display:flex;align-items:center;gap:8px">
-               <span style="font-size:12px;color:#10B981">🔔 Avisos activos</span>
-               <button id="btn-test-notif" style="background:#e5e7eb;color:#555;border:none;border-radius:8px;padding:6px 10px;font-size:12px">Probar aviso</button>
-             </div>`
-          : `<button id="btn-notif" style="background:#7C6AF7;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:13px">🔔 Activar avisos</button>`
-        }
+        <div style="display:flex;gap:8px;align-items:center">
+          <button id="btn-vac" style="background:#10B981;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:13px">🏖️ Vacaciones</button>
+          ${notifGranted
+            ?`<span style="font-size:12px;color:#10B981">🔔 Avisos activos</span>`
+            :`<button id="btn-notif" style="background:#7C6AF7;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:13px">🔔 Activar avisos</button>`
+          }
+        </div>
       </div>
 
       <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
@@ -352,9 +496,16 @@ function render() {
           <div class="cal-grid">
             ${Array.from({length:firstDay}).map(()=>`<div></div>`).join("")}
             ${Array.from({length:daysInMonth}).map((_,i)=>{
-              const d=i+1,ds=dateStr(year,month,d);
+              const d=i+1, ds=dateStr(year,month,d);
               const evts=events.filter(e=>e.date===ds&&(filter===0||e.members?.includes(filter)));
-              const isToday=ds===todayStr(),isSel=ds===selectedDate;
+              const isToday=ds===todayStr(), isSel=ds===selectedDate;
+              const vacColors=vacColorsForDate(ds);
+              const vacBar=vacColors.length>0
+                ?`<div class="vac-bar" style="background:${vacColors.length===1
+                    ?vacColors[0]
+                    :`linear-gradient(to right,${vacColors.map((c,i)=>`${c} ${i/vacColors.length*100}%,${c} ${(i+1)/vacColors.length*100}%`).join(",")})`
+                  };opacity:0.7"></div>`
+                :"";
               return `<div class="cal-day" onclick="selectDate('${ds}')"
                 style="background:${isSel?'#7C6AF7':isToday?'#F0EEFF':'#fafafa'};border:1.5px solid ${isToday&&!isSel?'#7C6AF7':'transparent'}">
                 <div style="font-size:13px;font-weight:600;color:${isSel?'#fff':isToday?'#7C6AF7':'#333'};margin-bottom:2px">${d}</div>
@@ -362,12 +513,14 @@ function render() {
                   ${evts.slice(0,3).map(e=>`<div style="width:7px;height:7px;border-radius:50%;background:${e.type==='appointment'?'#F43F5E':memberColor(e.members?.[0])}"></div>`).join("")}
                   ${evts.length>3?`<span style="font-size:9px;color:${isSel?'#fff':'#999'}">+${evts.length-3}</span>`:""}
                 </div>
+                ${vacBar}
               </div>`;
             }).join("")}
           </div>
-          <div style="margin-top:14px;display:flex;gap:14px;font-size:12px;color:#888">
+          <div style="margin-top:14px;display:flex;gap:14px;font-size:12px;color:#888;flex-wrap:wrap">
             <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#7C6AF7;margin-right:4px"></span>Tarea</span>
             <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#F43F5E;margin-right:4px"></span>Cita</span>
+            <span><span style="display:inline-block;width:20px;height:5px;border-radius:2px;background:#10B981;margin-right:4px;vertical-align:middle"></span>Vacaciones</span>
           </div>
         </div>
 
@@ -408,27 +561,24 @@ function render() {
       </div>
     </div>`;
 
-  document.getElementById("btn-notif")?.addEventListener("click", requestNotif);
-  document.getElementById("btn-test-notif")?.addEventListener("click", () => {
-    new Notification("🔔 Prueba de aviso", { body:"¡Las notificaciones funcionan correctamente!" });
-    sendEmailReminder({title:"Prueba",time:"12:00",place:"",date:todayStr(),type:"task"}, "luis_cm_cc@msn.com", "Luis", "ahora (prueba)");
-  });
+  document.getElementById("btn-notif")?.addEventListener("click",requestNotif);
+  document.getElementById("btn-vac")?.addEventListener("click",()=>{vacModal=true;renderVacModal();});
   document.getElementById("btn-add")?.addEventListener("click",()=>{
     modalData={mode:"add",event:{type:"task",title:"",date:state.selectedDate,time:"",members:[],done:false,desc:"",place:"",duration:""}};
     renderModal();
   });
 }
 
-window.setFilter   = f => setState({filter:f});
-window.selectDate  = d => setState({selectedDate:d});
-window.prevMonth   = () => state.month===0?setState({month:11,year:state.year-1}):setState({month:state.month-1});
-window.nextMonth   = () => state.month===11?setState({month:0,year:state.year+1}):setState({month:state.month+1});
-window.openEdit    = evt => { modalData={mode:"edit",event:{...evt}}; renderModal(); };
-window.deleteEvent = id  => deleteEvent(id);
-window.toggleDone  = id  => toggleDone(id);
-window.editMember  = id  => setState({editingMemberId:id});
-window.cancelMember= ()  => setState({editingMemberId:null});
-window.confirmMember = id => { const val=document.getElementById(`edit-${id}`)?.value; if(val) saveMember(id,val); };
+window.setFilter   = f=>setState({filter:f});
+window.selectDate  = d=>setState({selectedDate:d});
+window.prevMonth   = ()=>state.month===0?setState({month:11,year:state.year-1}):setState({month:state.month-1});
+window.nextMonth   = ()=>state.month===11?setState({month:0,year:state.year+1}):setState({month:state.month+1});
+window.openEdit    = evt=>{modalData={mode:"edit",event:{...evt}};renderModal();};
+window.deleteEvent = id=>deleteEvent(id);
+window.toggleDone  = id=>toggleDone(id);
+window.editMember  = id=>setState({editingMemberId:id});
+window.cancelMember= ()=>setState({editingMemberId:null});
+window.confirmMember=id=>{const val=document.getElementById(`edit-${id}`)?.value;if(val)saveMember(id,val);};
 
 render();
 </script>
