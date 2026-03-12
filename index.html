@@ -280,7 +280,10 @@ function render() {
           <span style="font-size:12px;color:#888">${status}</span>
         </div>
         ${notifGranted
-          ? `<span style="font-size:12px;color:#10B981">🔔 Avisos activos</span>`
+          ? `<div style="display:flex;align-items:center;gap:8px">
+               <span style="font-size:12px;color:#10B981">🔔 Avisos activos</span>
+               <button id="btn-test-notif" style="background:#e5e7eb;color:#555;border:none;border-radius:8px;padding:6px 10px;font-size:12px">Probar aviso</button>
+             </div>`
           : `<button id="btn-notif" style="background:#7C6AF7;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:13px">🔔 Activar avisos</button>`
         }
       </div>
@@ -373,6 +376,9 @@ function render() {
   `;
 
   document.getElementById("btn-notif")?.addEventListener("click", requestNotif);
+  document.getElementById("btn-test-notif")?.addEventListener("click", () => {
+    new Notification("🔔 Prueba de aviso", { body: "¡Las notificaciones funcionan correctamente!" });
+  });
   document.getElementById("btn-add")?.addEventListener("click", () => {
     modalData = {mode:"add", event:{type:"task",title:"",date:state.selectedDate,time:"",members:[],done:false,desc:"",place:"",duration:""}};
     renderModal();
