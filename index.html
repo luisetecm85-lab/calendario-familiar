@@ -27,6 +27,12 @@
 <script type="module">
 import { initializeApp, getApps } from "https://cdn.jsdelivr.net/npm/firebase@10.12.0/app/+esm";
 import { getFirestore, collection, onSnapshot, doc, setDoc, deleteDoc } from "https://cdn.jsdelivr.net/npm/firebase@10.12.0/firestore/+esm";
+import emailjs from "https://cdn.jsdelivr.net/npm/@emailjs/browser@4/+esm";
+
+const EMAILJS_SERVICE = "service_fb4wvj1";
+const EMAILJS_TEMPLATE = "template_fu8l9zf";
+const EMAILJS_KEY = "bz1Do_nJPcpdEza1O";
+emailjs.init(EMAILJS_KEY);
 
 const firebaseConfig = {
   apiKey: "AIzaSyAF9BnqsRo2SAO1mzXM8VeRBMFgH9bQ8Jc",
@@ -41,10 +47,10 @@ const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const DEFAULT_MEMBERS = [
-  { id: 1, name: "Mamá", color: "#7C6AF7" },
-  { id: 2, name: "Papá", color: "#F97316" },
-  { id: 3, name: "Hijo/a 1", color: "#10B981" },
-  { id: 4, name: "Hijo/a 2", color: "#F43F5E" },
+  { id: 1, name: "Mamá", color: "#7C6AF7", email: "evagp85@hotmail.com" },
+  { id: 2, name: "Papá", color: "#F97316", email: "luis_cm_cc@msn.com" },
+  { id: 3, name: "Hijo/a 1", color: "#10B981", email: "" },
+  { id: 4, name: "Hijo/a 2", color: "#F43F5E", email: "" },
 ];
 
 const DAYS = ["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"];
@@ -81,21 +87,81 @@ function memberColor(id) { return state.members.find(m=>m.id===id)?.color||"#999
 
 function setState(patch) { state = {...state, ...patch}; render(); }
 
+async function sendEmailReminder(evt, memberEmail, memberName, when) {
+  if (!memberEmail) return;
+  try {
+    await emailjs.send(EMAILJS_SERVICE, EMAILJS_TEMPLATE, {
+      to_email: memberEmail,
+      to_name: memberName,
+      title: evt.title,
+      time: evt.time,
+      place: evt.place || "Sin lugar especificado",
+      date: evt.date,
+      type: evt.type === "appointment" ? "Cita" : "Tarea",
+      when: when,
+    });
+    console.log(`Email enviado a ${memberEmail} (${when})`);
+  } catch(e) {
+    console.error("Error enviando email:", e);
+  }
+}
+
 function checkNotifications() {
-  if (!state.notifGranted) return;
+  if (!state.notifGranted && state.members.every(m => !m.email)) return;
   const now = new Date();
   const todayS = todayStr();
+
+  // Helper to get yesterday's date string
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowS = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth()+1).padStart(2,'0')}-${String(tomorrow.getDate()).padStart(2,'0')}`;
+
   state.events.forEach(e => {
-    if (!e.time || e.date !== todayS) return;
+    if (!e.time) return;
+
+    // 1) Day-before reminder at 20:00
+    if (e.date === tomorrowS) {
+      const key = `${e.id}-dayBefore`;
+      if (now.getHours() === 20 && now.getMinutes() < 2 && !notified.has(key)) {
+        notified.add(key);
+        (e.members||[]).forEach(mid => {
+          const mem = state.members.find(m => m.id === mid);
+          if (mem?.email) sendEmailReminder(e, mem.email, mem.name, "mañana");
+        });
+      }
+    }
+
+    if (e.date !== todayS) return;
     const [h, m] = e.time.split(":").map(Number);
     const eventTime = new Date();
     eventTime.setHours(h, m, 0, 0);
     const diff = eventTime - now;
-    const key = `${e.id}-notif`;
-    if (diff > 55*60*1000 && diff < 65*60*1000 && !notified.has(key)) {
-      notified.add(key);
-      new Notification(`${e.type==="appointment"?"📌 Cita":"📋 Tarea"}: ${e.title}`, {
-        body: `En 1 hora · ${e.time}${e.place ? " · "+e.place : ""}`
+
+    // 2) Same-day reminder at 8:00
+    const key8 = `${e.id}-8am`;
+    if (now.getHours() === 8 && now.getMinutes() < 2 && !notified.has(key8)) {
+      notified.add(key8);
+      if (state.notifGranted) {
+        new Notification(`📅 Hoy: ${e.title}`, { body: `A las ${e.time}${e.place ? " · "+e.place : ""}` });
+      }
+      (e.members||[]).forEach(mid => {
+        const mem = state.members.find(m => m.id === mid);
+        if (mem?.email) sendEmailReminder(e, mem.email, mem.name, "hoy");
+      });
+    }
+
+    // 3) 1 hour before
+    const key1h = `${e.id}-1h`;
+    if (diff > 55*60*1000 && diff < 65*60*1000 && !notified.has(key1h)) {
+      notified.add(key1h);
+      if (state.notifGranted) {
+        new Notification(`${e.type==="appointment"?"📌 Cita":"📋 Tarea"}: ${e.title}`, {
+          body: `En 1 hora · ${e.time}${e.place ? " · "+e.place : ""}`
+        });
+      }
+      (e.members||[]).forEach(mid => {
+        const mem = state.members.find(m => m.id === mid);
+        if (mem?.email) sendEmailReminder(e, mem.email, mem.name, "en 1 hora");
       });
     }
   });
