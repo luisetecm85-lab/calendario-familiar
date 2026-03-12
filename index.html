@@ -15,13 +15,14 @@
     .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.3); display: flex; align-items: center; justify-content: center; z-index: 100; }
     .modal { background: #fff; border-radius: 16px; padding: 28px; width: 360px; box-shadow: 0 8px 32px rgba(0,0,0,.12); max-height: 90vh; overflow-y: auto; }
     .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
-    input[type=text], input[type=date], input[type=time] { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1.5px solid #e5e7eb; font-size: 14px; outline: none; background: #fafafa; box-sizing: border-box; }
+    .finp { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1.5px solid #e5e7eb; font-size: 14px; outline: none; background: #fafafa; box-sizing: border-box; }
     label { display: block; font-size: 12px; font-weight: 600; color: #888; margin-bottom: 5px; }
     @media (max-width: 650px) { .grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
 <div id="app"><p style="padding:20px;color:#888">Cargando...</p></div>
+<div id="modal-root"></div>
 
 <script type="module">
 import { initializeApp, getApps } from "https://cdn.jsdelivr.net/npm/firebase@10.12.0/app/+esm";
@@ -49,6 +50,9 @@ const DEFAULT_MEMBERS = [
 const DAYS = ["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"];
 const MONTHS = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 
+// Modal state is kept separately and never triggers full re-render
+let modalData = null;
+
 let state = {
   year: new Date().getFullYear(),
   month: new Date().getMonth(),
@@ -56,7 +60,6 @@ let state = {
   events: [],
   members: [...DEFAULT_MEMBERS],
   filter: 0,
-  modal: null,
   editingMemberId: null,
   status: "Conectando…",
   notifGranted: false
@@ -75,9 +78,9 @@ function getDaysInMonth(y,m) { return new Date(y,m+1,0).getDate(); }
 function getFirstDay(y,m) { const d=new Date(y,m,1).getDay(); return d===0?6:d-1; }
 function uid() { return Math.random().toString(36).slice(2,10); }
 function memberColor(id) { return state.members.find(m=>m.id===id)?.color||"#999"; }
+
 function setState(patch) { state = {...state, ...patch}; render(); }
 
-// Notification checker
 function checkNotifications() {
   if (!state.notifGranted) return;
   const now = new Date();
@@ -99,7 +102,6 @@ function checkNotifications() {
 }
 setInterval(checkNotifications, 60000);
 
-// Firebase listeners
 onSnapshot(collection(db,"events"), snap => {
   state.events = snap.docs.map(d => ({id:d.id,...d.data()}));
   state.status = "🟢 Sincronizado";
@@ -117,16 +119,10 @@ onSnapshot(collection(db,"members"), snap => {
   }
 });
 
-// Check if already granted on load
-if ("Notification" in window && Notification.permission==="granted") {
-  state.notifGranted = true;
-}
+if ("Notification" in window && Notification.permission==="granted") state.notifGranted = true;
 
 async function requestNotif() {
-  if (!("Notification" in window)) {
-    alert("Tu navegador no soporta notificaciones.");
-    return;
-  }
+  if (!("Notification" in window)) { alert("Tu navegador no soporta notificaciones."); return; }
   const p = await Notification.requestPermission();
   if (p==="granted") {
     setState({notifGranted: true});
@@ -141,7 +137,8 @@ async function saveEvent(evt) {
   const toSave = {...evt, id};
   const exists = state.events.find(e=>e.id===id);
   state.events = exists ? state.events.map(e=>e.id===id?toSave:e) : [...state.events, toSave];
-  state.modal = null;
+  modalData = null;
+  renderModal();
   render();
   try { await setDoc(doc(db,"events",id), toSave); } catch(e) { console.error(e); }
 }
@@ -168,8 +165,107 @@ async function saveMember(id, name) {
   try { await setDoc(doc(db,"members",String(id)), member); } catch(e) { console.error(e); }
 }
 
+// Modal renders into separate div — never touched by main render()
+function renderModal() {
+  const root = document.getElementById("modal-root");
+  if (!modalData) { root.innerHTML = ""; return; }
+  const {mode, event: e} = modalData;
+  const members = state.members;
+  root.innerHTML = `
+    <div class="modal-bg" id="modal-bg">
+      <div class="modal">
+        <h3 style="margin:0 0 18px;font-size:17px;color:#1a1a2e">${mode==='add'?'Nuevo evento':'Editar evento'}</h3>
+        <div style="margin-bottom:12px">
+          <label>Tipo</label>
+          <div style="display:flex;gap:8px">
+            <button id="btn-task" style="flex:1;padding:7px;border-radius:8px;border:none;background:${e.type==='task'?'#7C6AF7':'#f0f0f0'};color:${e.type==='task'?'#fff':'#555'};font-weight:600;font-size:13px">✅ Tarea</button>
+            <button id="btn-appt" style="flex:1;padding:7px;border-radius:8px;border:none;background:${e.type==='appointment'?'#7C6AF7':'#f0f0f0'};color:${e.type==='appointment'?'#fff':'#555'};font-weight:600;font-size:13px">📌 Cita</button>
+          </div>
+        </div>
+        <div style="margin-bottom:12px">
+          <label>Título</label>
+          <input id="f-title" class="finp" value="${e.title||''}" placeholder="Ej: Ir al médico"/>
+        </div>
+        <div class="two-col">
+          <div><label>Fecha</label><input id="f-date" type="date" class="finp" value="${e.date||''}"/></div>
+          <div><label>Hora</label><input id="f-time" type="time" class="finp" value="${e.time||''}"/></div>
+        </div>
+        <div id="appt-fields" style="display:${e.type==='appointment'?'block':'none'}">
+          <div class="two-col">
+            <div><label>Lugar</label><input id="f-place" class="finp" value="${e.place||''}" placeholder="Clínica..."/></div>
+            <div><label>Duración</label><input id="f-duration" class="finp" value="${e.duration||''}" placeholder="Ej: 1h"/></div>
+          </div>
+        </div>
+        <div style="margin-bottom:12px">
+          <label>Descripción (opcional)</label>
+          <input id="f-desc" class="finp" value="${e.desc||''}" placeholder="Notas adicionales"/>
+        </div>
+        <div style="margin-bottom:18px">
+          <label>Miembros</label>
+          <div id="member-btns" style="display:flex;gap:8px;flex-wrap:wrap">
+            ${members.map(m=>`
+              <button data-mid="${m.id}" style="padding:5px 12px;border-radius:20px;border:none;background:${(e.members||[]).includes(m.id)?m.color:'#f0f0f0'};color:${(e.members||[]).includes(m.id)?'#fff':'#555'};font-size:13px;font-weight:600">${m.name}</button>
+            `).join("")}
+          </div>
+        </div>
+        <div style="display:flex;gap:10px">
+          <button id="btn-cancel" style="flex:1;padding:10px;border-radius:9px;border:none;background:#f0f0f0;color:#555;font-weight:600">Cancelar</button>
+          <button id="btn-save" style="flex:1;padding:10px;border-radius:9px;border:none;background:#7C6AF7;color:#fff;font-weight:600">Guardar</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Attach events without re-rendering
+  document.getElementById("modal-bg").addEventListener("click", e => { if(e.target.id==="modal-bg") closeModal(); });
+  document.getElementById("btn-cancel").addEventListener("click", closeModal);
+  document.getElementById("btn-task").addEventListener("click", () => {
+    modalData.event.type = "task";
+    document.getElementById("appt-fields").style.display = "none";
+    document.getElementById("btn-task").style.background = "#7C6AF7";
+    document.getElementById("btn-task").style.color = "#fff";
+    document.getElementById("btn-appt").style.background = "#f0f0f0";
+    document.getElementById("btn-appt").style.color = "#555";
+  });
+  document.getElementById("btn-appt").addEventListener("click", () => {
+    modalData.event.type = "appointment";
+    document.getElementById("appt-fields").style.display = "block";
+    document.getElementById("btn-appt").style.background = "#7C6AF7";
+    document.getElementById("btn-appt").style.color = "#fff";
+    document.getElementById("btn-task").style.background = "#f0f0f0";
+    document.getElementById("btn-task").style.color = "#555";
+  });
+  document.getElementById("btn-save").addEventListener("click", () => {
+    const title = document.getElementById("f-title").value.trim();
+    if (!title) return;
+    saveEvent({
+      ...modalData.event,
+      title,
+      date: document.getElementById("f-date").value,
+      time: document.getElementById("f-time").value,
+      place: document.getElementById("f-place")?.value||"",
+      duration: document.getElementById("f-duration")?.value||"",
+      desc: document.getElementById("f-desc").value,
+    });
+  });
+  document.querySelectorAll("[data-mid]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const id = Number(btn.dataset.mid);
+      const ms = modalData.event.members||[];
+      modalData.event.members = ms.includes(id) ? ms.filter(m=>m!==id) : [...ms, id];
+      const mem = state.members.find(m=>m.id===id);
+      if (mem) {
+        btn.style.background = modalData.event.members.includes(id) ? mem.color : "#f0f0f0";
+        btn.style.color = modalData.event.members.includes(id) ? "#fff" : "#555";
+      }
+    });
+  });
+}
+
+function closeModal() { modalData = null; renderModal(); }
+
 function render() {
-  const {year,month,selectedDate,events,members,filter,modal,editingMemberId,status,notifGranted} = state;
+  const {year,month,selectedDate,events,members,filter,editingMemberId,status,notifGranted} = state;
   const daysInMonth = getDaysInMonth(year,month);
   const firstDay = getFirstDay(year,month);
   const selectedEvents = events
@@ -178,7 +274,6 @@ function render() {
 
   document.getElementById("app").innerHTML = `
     <div style="max-width:900px;margin:0 auto">
-
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <div>
           <h1 style="font-size:22px;font-weight:700;color:#1a1a2e">🏠 Calendario Familiar</h1>
@@ -186,7 +281,7 @@ function render() {
         </div>
         ${notifGranted
           ? `<span style="font-size:12px;color:#10B981">🔔 Avisos activos</span>`
-          : `<button onclick="requestNotif()" style="background:#7C6AF7;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:13px">🔔 Activar avisos</button>`
+          : `<button id="btn-notif" style="background:#7C6AF7;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:13px">🔔 Activar avisos</button>`
         }
       </div>
 
@@ -244,7 +339,7 @@ function render() {
               <div style="font-weight:700;font-size:15px;color:#1a1a2e">${selectedDate===todayStr()?"Hoy":selectedDate}</div>
               <div style="font-size:12px;color:#aaa">${selectedEvents.length} evento(s)</div>
             </div>
-            <button onclick="openAdd()" style="background:#7C6AF7;color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:600">+ Añadir</button>
+            <button id="btn-add" style="background:#7C6AF7;color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:600">+ Añadir</button>
           </div>
           <div style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:10px">
             ${selectedEvents.length===0
@@ -274,78 +369,23 @@ function render() {
           </div>
         </div>
       </div>
-
-      ${modal ? renderModal() : ""}
     </div>
   `;
+
+  document.getElementById("btn-notif")?.addEventListener("click", requestNotif);
+  document.getElementById("btn-add")?.addEventListener("click", () => {
+    modalData = {mode:"add", event:{type:"task",title:"",date:state.selectedDate,time:"",members:[],done:false,desc:"",place:"",duration:""}};
+    renderModal();
+  });
 }
 
-function renderModal() {
-  const {modal, members} = state;
-  const e = modal.event;
-  return `
-    <div class="modal-bg" onclick="bgClose(event)">
-      <div class="modal">
-        <h3 style="margin:0 0 18px;font-size:17px;color:#1a1a2e">${modal.mode==='add'?'Nuevo evento':'Editar evento'}</h3>
-        <div style="margin-bottom:12px">
-          <label>Tipo</label>
-          <div style="display:flex;gap:8px">
-            <button onclick="setField('type','task')" style="flex:1;padding:7px;border-radius:8px;border:none;background:${e.type==='task'?'#7C6AF7':'#f0f0f0'};color:${e.type==='task'?'#fff':'#555'};font-weight:600;font-size:13px">✅ Tarea</button>
-            <button onclick="setField('type','appointment')" style="flex:1;padding:7px;border-radius:8px;border:none;background:${e.type==='appointment'?'#7C6AF7':'#f0f0f0'};color:${e.type==='appointment'?'#fff':'#555'};font-weight:600;font-size:13px">📌 Cita</button>
-          </div>
-        </div>
-        <div style="margin-bottom:12px">
-          <label>Título</label>
-          <input type="text" id="f-title" value="${e.title||''}" oninput="setField('title',this.value)" placeholder="Ej: Ir al médico"/>
-        </div>
-        <div class="two-col">
-          <div><label>Fecha</label><input type="date" value="${e.date||''}" oninput="setField('date',this.value)"/></div>
-          <div><label>Hora</label><input type="time" value="${e.time||''}" oninput="setField('time',this.value)"/></div>
-        </div>
-        ${e.type==='appointment'?`
-        <div class="two-col">
-          <div><label>Lugar</label><input type="text" value="${e.place||''}" oninput="setField('place',this.value)" placeholder="Clínica..."/></div>
-          <div><label>Duración</label><input type="text" value="${e.duration||''}" oninput="setField('duration',this.value)" placeholder="Ej: 1h"/></div>
-        </div>`:''}
-        <div style="margin-bottom:12px">
-          <label>Descripción (opcional)</label>
-          <input type="text" value="${e.desc||''}" oninput="setField('desc',this.value)" placeholder="Notas adicionales"/>
-        </div>
-        <div style="margin-bottom:18px">
-          <label>Miembros</label>
-          <div style="display:flex;gap:8px;flex-wrap:wrap">
-            ${members.map(m=>`
-              <button onclick="toggleMember(${m.id})" style="padding:5px 12px;border-radius:20px;border:none;background:${(e.members||[]).includes(m.id)?m.color:'#f0f0f0'};color:${(e.members||[]).includes(m.id)?'#fff':'#555'};font-size:13px;font-weight:600">${m.name}</button>
-            `).join("")}
-          </div>
-        </div>
-        <div style="display:flex;gap:10px">
-          <button onclick="closeModal()" style="flex:1;padding:10px;border-radius:9px;border:none;background:#f0f0f0;color:#555;font-weight:600">Cancelar</button>
-          <button onclick="submitModal()" style="flex:1;padding:10px;border-radius:9px;border:none;background:#7C6AF7;color:#fff;font-weight:600;opacity:${e.title?1:.5}">Guardar</button>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-window.requestNotif = requestNotif;
 window.setFilter = f => setState({filter:f});
 window.selectDate = d => setState({selectedDate:d});
 window.prevMonth = () => state.month===0 ? setState({month:11,year:state.year-1}) : setState({month:state.month-1});
 window.nextMonth = () => state.month===11 ? setState({month:0,year:state.year+1}) : setState({month:state.month+1});
-window.openAdd = () => setState({modal:{mode:"add",event:{type:"task",title:"",date:state.selectedDate,time:"",members:[],done:false,desc:"",place:"",duration:""}}});
-window.openEdit = evt => setState({modal:{mode:"edit",event:{...evt}}});
-window.closeModal = () => setState({modal:null});
-window.bgClose = e => { if(e.target.classList.contains("modal-bg")) setState({modal:null}); };
+window.openEdit = evt => { modalData = {mode:"edit", event:{...evt}}; renderModal(); };
 window.deleteEvent = id => deleteEvent(id);
 window.toggleDone = id => toggleDone(id);
-window.setField = (k,v) => { if(!state.modal) return; setState({modal:{...state.modal,event:{...state.modal.event,[k]:v}}}); };
-window.toggleMember = id => {
-  if(!state.modal) return;
-  const ms = state.modal.event.members||[];
-  setState({modal:{...state.modal,event:{...state.modal.event,members:ms.includes(id)?ms.filter(m=>m!==id):[...ms,id]}}});
-};
-window.submitModal = () => { if(state.modal?.event?.title) saveEvent(state.modal.event); };
 window.editMember = id => setState({editingMemberId:id});
 window.cancelMember = () => setState({editingMemberId:null});
 window.confirmMember = id => {
